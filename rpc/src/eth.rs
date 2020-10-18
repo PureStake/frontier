@@ -734,8 +734,14 @@ impl<B, C, P, CT, BE> EthApiT for EthApi<B, C, P, CT, BE> where
 				.current_all(&id)
 				.map_err(|err| internal_err(format!("fetch runtime account basic failed: {:?}", err)))?;
 
-			if let (Some(block), Some(statuses)) = (block, statuses) {
-				blocks_and_statuses.push((block, statuses));
+			
+			let block_hash = Some(H256::from_slice(
+				Keccak256::digest(&rlp::encode(&block.clone().unwrap().header)).as_slice()
+			));
+			let block_number = Some(block.unwrap().header.number);
+
+			if let (Some(block_hash), Some(block_number), Some(statuses)) = (block_hash, block_number, statuses) {
+				blocks_and_statuses.push((block_hash, block_number, statuses));
 			}
 		} else {
 			let mut current_number = filter.to_block
@@ -752,16 +758,23 @@ impl<B, C, P, CT, BE> EthApiT for EthApi<B, C, P, CT, BE> where
 					self.client.info().best_number
 				);
 			while current_number >= from_number {
-				let id = BlockId::Number(current_number);
 
-				let (block, _, statuses) = self.client.runtime_api()
-					.current_all(&id)
-					.map_err(|err| internal_err(format!("fetch runtime account basic failed: {:?}", err)))?;
+				let number = UniqueSaturatedInto::<u32>::unique_saturated_into(current_number);
 
-				if let (Some(block), Some(statuses)) = (block, statuses) {
-					blocks_and_statuses.push((block, statuses));
-				}
-
+				match frontier_consensus::load_logs(
+					self.client.as_ref(),
+					number
+				).map_err(|err| internal_err(format!("fetch aux store failed: {:?}", err)))?
+				{
+					Some((block_hash, statuses)) => {
+						let block_number = U256::from(
+							UniqueSaturatedInto::<u32>::unique_saturated_into(current_number)
+						);
+						blocks_and_statuses.push((block_hash, block_number, statuses));
+					},
+					_ => {},
+				};
+				
 				if current_number == Zero::zero() {
 					break
 				} else {
@@ -770,11 +783,8 @@ impl<B, C, P, CT, BE> EthApiT for EthApi<B, C, P, CT, BE> where
 			}
 		}
 
-		for (block, statuses) in blocks_and_statuses {
+		for (block_hash, block_number, statuses) in blocks_and_statuses {
 			let mut block_log_index: u32 = 0;
-			let block_hash = H256::from_slice(
-				Keccak256::digest(&rlp::encode(&block.header)).as_slice()
-			);
 			for status in statuses.iter() {
 				let logs = status.logs.clone();
 				let mut transaction_log_index: u32 = 0;
@@ -807,8 +817,8 @@ impl<B, C, P, CT, BE> EthApiT for EthApi<B, C, P, CT, BE> where
 							address: log.address.clone(),
 							topics: log.topics.clone(),
 							data: Bytes(log.data.clone()),
-							block_hash: Some(block_hash),
-							block_number: Some(block.header.number.clone()),
+							block_hash: Some(block_hash.clone()),
+							block_number: Some(block_number.clone()),
 							transaction_hash: Some(transaction_hash),
 							transaction_index: Some(U256::from(status.transaction_index)),
 							log_index: Some(U256::from(block_log_index)),
