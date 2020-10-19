@@ -29,6 +29,9 @@ use sc_client_api::backend::{StorageProvider, Backend, StateBackend, AuxStore};
 use sha3::{Keccak256, Digest};
 use sp_runtime::traits::BlakeTwo256;
 use sp_blockchain::{Error as BlockChainError, HeaderMetadata, HeaderBackend};
+use sp_storage::StorageKey;
+use codec::Decode;
+use sp_io::hashing::twox_128;
 use frontier_rpc_core::{EthApi as EthApiT, NetApi as NetApiT};
 use frontier_rpc_core::types::{
 	BlockNumber, Bytes, CallRequest, Filter, Index, Log, Receipt, RichBlock,
@@ -65,6 +68,10 @@ impl<B: BlockT, C, P, CT, BE, A: ChainApi> EthApi<B, C, P, CT, BE, A> {
 	) -> Self {
 		Self { client, pool, graph_pool, convert_transaction, is_authority, eth_block_limit, eth_log_limit, _marker: PhantomData }
 	}
+}
+
+fn storage_prefix_build(module: &[u8], storage: &[u8]) -> Vec<u8> {
+	[twox_128(module), twox_128(storage)].concat().to_vec()
 }
 
 fn rich_block_build(
@@ -246,6 +253,39 @@ impl<B, C, P, CT, BE, A> EthApi<B, C, P, CT, BE, A> where
 		);
 		(best_number, header_number)
 	}
+
+	fn current_block(&self, id: &BlockId<B>) -> Option<ethereum::Block> {
+		if let Ok(Some(block_data)) = self.client.storage(
+			&id,
+			&StorageKey(
+				storage_prefix_build(b"Ethereum", b"CurrentBlock")
+			)
+		) {
+			return Some(Decode::decode(&mut &block_data.0[..]).unwrap());
+		} else { return None; };
+	}
+
+	fn current_statuses(&self, id: &BlockId<B>) -> Option<Vec<TransactionStatus>> {
+		if let Ok(Some(status_data)) = self.client.storage(
+			&id,
+			&StorageKey(
+				storage_prefix_build(b"Ethereum", b"CurrentTransactionStatuses")
+			)
+		) {
+			return Some(Decode::decode(&mut &status_data.0[..]).unwrap());
+		} else { return None; };
+	}
+
+	fn current_receipts(&self, id: &BlockId<B>) -> Option<Vec<ethereum::Receipt>> {
+		if let Ok(Some(status_data)) = self.client.storage(
+			&id,
+			&StorageKey(
+				storage_prefix_build(b"Ethereum", b"CurrentReceipts")
+			)
+		) {
+			return Some(Decode::decode(&mut &status_data.0[..]).unwrap());
+		} else { return None; };
+	}
 }
 
 impl<B, C, P, CT, BE, A> EthApiT for EthApi<B, C, P, CT, BE, A> where
@@ -358,10 +398,8 @@ impl<B, C, P, CT, BE, A> EthApiT for EthApi<B, C, P, CT, BE, A> where
 			return Ok(None);
 		}
 
-		let block = self.client.runtime_api().current_block(&id)
-			.map_err(|err| internal_err(format!("call runtime failed: {:?}", err)))?;
-		let statuses = self.client.runtime_api().current_transaction_statuses(&id)
-			.map_err(|err| internal_err(format!("call runtime failed: {:?}", err)))?;
+		let block: Option<ethereum::Block> = self.current_block(&id);
+		let statuses: Option<Vec<TransactionStatus>> = self.current_statuses(&id);
 
 		match (block, statuses) {
 			(Some(block), Some(statuses)) => {
@@ -384,10 +422,8 @@ impl<B, C, P, CT, BE, A> EthApiT for EthApi<B, C, P, CT, BE, A> where
 			None => return Ok(None),
 		};
 
-		let block = self.client.runtime_api().current_block(&id)
-			.map_err(|err| internal_err(format!("call runtime failed: {:?}", err)))?;
-		let statuses = self.client.runtime_api().current_transaction_statuses(&id)
-			.map_err(|err| internal_err(format!("call runtime failed: {:?}", err)))?;
+		let block: Option<ethereum::Block> = self.current_block(&id);
+		let statuses: Option<Vec<TransactionStatus>> = self.current_statuses(&id);
 
 		match (block, statuses) {
 			(Some(block), Some(statuses)) => {
@@ -434,9 +470,7 @@ impl<B, C, P, CT, BE, A> EthApiT for EthApi<B, C, P, CT, BE, A> where
 			return Ok(None);
 		}
 
-		let block = self.client.runtime_api()
-			.current_block(&id)
-			.map_err(|err| internal_err(format!("fetch runtime account basic failed: {:?}", err)))?;
+		let block: Option<ethereum::Block> = self.current_block(&id);
 
 		match block {
 			Some(block) => Ok(Some(U256::from(block.transactions.len()))),
@@ -450,9 +484,7 @@ impl<B, C, P, CT, BE, A> EthApiT for EthApi<B, C, P, CT, BE, A> where
 			None => return Ok(None),
 		};
 
-		let block = self.client.runtime_api()
-			.current_block(&id)
-			.map_err(|err| internal_err(format!("fetch runtime account basic failed: {:?}", err)))?;
+		let block: Option<ethereum::Block> = self.current_block(&id);
 
 		match block {
 			Some(block) => Ok(Some(U256::from(block.transactions.len()))),
@@ -600,10 +632,8 @@ impl<B, C, P, CT, BE, A> EthApiT for EthApi<B, C, P, CT, BE, A> where
 			return Ok(None);
 		}
 
-		let block = self.client.runtime_api().current_block(&id)
-			.map_err(|err| internal_err(format!("call runtime failed: {:?}", err)))?;
-		let statuses = self.client.runtime_api().current_transaction_statuses(&id)
-			.map_err(|err| internal_err(format!("call runtime failed: {:?}", err)))?;
+		let block: Option<ethereum::Block> = self.current_block(&id);
+		let statuses: Option<Vec<TransactionStatus>> = self.current_statuses(&id);
 
 		match (block, statuses) {
 			(Some(block), Some(statuses)) => {
@@ -634,10 +664,8 @@ impl<B, C, P, CT, BE, A> EthApiT for EthApi<B, C, P, CT, BE, A> where
 		}
 		let index = index.value();
 
-		let block = self.client.runtime_api().current_block(&id)
-			.map_err(|err| internal_err(format!("call runtime failed: {:?}", err)))?;
-		let statuses = self.client.runtime_api().current_transaction_statuses(&id)
-			.map_err(|err| internal_err(format!("call runtime failed: {:?}", err)))?;
+		let block: Option<ethereum::Block> = self.current_block(&id);
+		let statuses: Option<Vec<TransactionStatus>> = self.current_statuses(&id);
 
 		match (block, statuses) {
 			(Some(block), Some(statuses)) => {
@@ -662,10 +690,8 @@ impl<B, C, P, CT, BE, A> EthApiT for EthApi<B, C, P, CT, BE, A> where
 		};
 		let index = index.value();
 
-		let block = self.client.runtime_api().current_block(&id)
-			.map_err(|err| internal_err(format!("call runtime failed: {:?}", err)))?;
-		let statuses = self.client.runtime_api().current_transaction_statuses(&id)
-			.map_err(|err| internal_err(format!("call runtime failed: {:?}", err)))?;
+		let block: Option<ethereum::Block> = self.current_block(&id);
+		let statuses: Option<Vec<TransactionStatus>> = self.current_statuses(&id);
 
 		match (block, statuses) {
 			(Some(block), Some(statuses)) => {
@@ -699,12 +725,9 @@ impl<B, C, P, CT, BE, A> EthApiT for EthApi<B, C, P, CT, BE, A> where
 			return Ok(None);
 		}
 
-		let block = self.client.runtime_api().current_block(&id)
-			.map_err(|err| internal_err(format!("call runtime failed: {:?}", err)))?;
-		let receipts = self.client.runtime_api().current_receipts(&id)
-			.map_err(|err| internal_err(format!("call runtime failed: {:?}", err)))?;
-		let statuses = self.client.runtime_api().current_transaction_statuses(&id)
-			.map_err(|err| internal_err(format!("call runtime failed: {:?}", err)))?;
+		let block: Option<ethereum::Block> = self.current_block(&id);
+		let statuses: Option<Vec<TransactionStatus>> = self.current_statuses(&id);
+		let receipts: Option<Vec<ethereum::Receipt>> = self.current_receipts(&id);
 
 		match (block, statuses, receipts) {
 			(Some(block), Some(statuses), Some(receipts)) => {
@@ -804,12 +827,16 @@ impl<B, C, P, CT, BE, A> EthApiT for EthApi<B, C, P, CT, BE, A> where
 				return Ok(Vec::new());
 			}
 
-			let (block, _, statuses) = self.client.runtime_api()
-				.current_all(&id)
-				.map_err(|err| internal_err(format!("fetch runtime account basic failed: {:?}", err)))?;
+			let block: Option<ethereum::Block> = self.current_block(&id);
+			let statuses: Option<Vec<TransactionStatus>> = self.current_statuses(&id);
 
-			if let (Some(block), Some(statuses)) = (block, statuses) {
-				blocks_and_statuses.push((block, statuses));
+			let block_hash = Some(H256::from_slice(
+				Keccak256::digest(&rlp::encode(&block.clone().unwrap().header)).as_slice()
+			));
+			let block_number = Some(block.unwrap().header.number);
+
+			if let (Some(block_hash), Some(block_number), Some(statuses)) = (block_hash, block_number, statuses) {
+				blocks_and_statuses.push((block_hash, block_number, statuses));
 			}
 		} else {
 			let mut current_number = filter.to_block
@@ -826,15 +853,21 @@ impl<B, C, P, CT, BE, A> EthApiT for EthApi<B, C, P, CT, BE, A> where
 					self.client.info().best_number
 				);
 			while current_number >= from_number {
-				let id = BlockId::Number(current_number);
+				let number = UniqueSaturatedInto::<u32>::unique_saturated_into(current_number);
 
-				let (block, _, statuses) = self.client.runtime_api()
-					.current_all(&id)
-					.map_err(|err| internal_err(format!("fetch runtime account basic failed: {:?}", err)))?;
-
-				if let (Some(block), Some(statuses)) = (block, statuses) {
-					blocks_and_statuses.push((block, statuses));
-				}
+				match frontier_consensus::load_logs(
+					self.client.as_ref(),
+					number
+				).map_err(|err| internal_err(format!("fetch aux store failed: {:?}", err)))?
+				{
+					Some((block_hash, statuses)) => {
+						let block_number = U256::from(
+							UniqueSaturatedInto::<u32>::unique_saturated_into(current_number)
+						);
+						blocks_and_statuses.push((block_hash, block_number, statuses));
+					},
+					_ => {},
+				};
 
 				if current_number == Zero::zero() {
 					break
@@ -847,14 +880,11 @@ impl<B, C, P, CT, BE, A> EthApiT for EthApi<B, C, P, CT, BE, A> where
 		let mut blocks_processed: u32 = 0;
 		let mut logs_processed: u32 = 0;
 		
-		'outer: for (block, statuses) in blocks_and_statuses {
+		'outer: for (block_hash, block_number, statuses) in blocks_and_statuses {
 			if blocks_processed == eth_block_limit {
 				break;
 			}
 			let mut block_log_index: u32 = 0;
-			let block_hash = H256::from_slice(
-				Keccak256::digest(&rlp::encode(&block.header)).as_slice()
-			);
 			for status in statuses.iter() {
 				let logs = status.logs.clone();
 				let mut transaction_log_index: u32 = 0;
@@ -890,8 +920,8 @@ impl<B, C, P, CT, BE, A> EthApiT for EthApi<B, C, P, CT, BE, A> where
 							address: log.address.clone(),
 							topics: log.topics.clone(),
 							data: Bytes(log.data.clone()),
-							block_hash: Some(block_hash),
-							block_number: Some(block.header.number.clone()),
+							block_hash: Some(block_hash.clone()),
+							block_number: Some(block_number.clone()),
 							transaction_hash: Some(transaction_hash),
 							transaction_index: Some(U256::from(status.transaction_index)),
 							log_index: Some(U256::from(block_log_index)),
