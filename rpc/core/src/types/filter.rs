@@ -49,8 +49,12 @@ impl<'a, T> Deserialize<'a> for VariadicValue<T> where T: DeserializeOwned {
 
 /// Filter Address
 pub type FilterAddress = VariadicValue<H160>;
-/// Topic
-pub type Topic = VariadicValue<H256>;
+/// Topic, supports `A` | `null` | `[A,B,C]` | `[A,[B,C]]` | [null,[B,C]] | [null,[null,C]]
+pub type Topic = VariadicValue<Option<
+	VariadicValue<Option<H256>>
+>>;
+/// FlatTopic, simplifies the matching logic.
+pub type FlatTopic = VariadicValue<Option<H256>>;
 
 /// Filter
 #[derive(Debug, PartialEq, Clone, Deserialize, Eq, Hash)]
@@ -67,6 +71,204 @@ pub struct Filter {
 	pub address: Option<FilterAddress>,
 	/// Topics
 	pub topics: Option<Topic>,
+}
+
+/// Helper for Filter matching.
+/// Supports conditional indexed parameters and wildcards.
+#[derive(Debug)]
+pub struct FilteredParams {
+	pub filter: Option<Filter>,
+	flat_topics: Vec<FlatTopic>,
+}
+
+impl Default for FilteredParams {
+	fn default() -> Self {
+		FilteredParams {
+			filter: None,
+			flat_topics: Vec::new()
+		}
+	}
+}
+
+impl FilteredParams {
+	pub fn new(
+		f: Option<Filter>,
+	) -> Self {
+		if let Some(f) = f {
+			return FilteredParams {
+				filter: Some(f.clone()),
+				flat_topics: {
+					if let Some(t) = f.clone().topics {
+						Self::flatten(&t)
+					} else { Vec:: new() }
+				}
+			};
+		}
+		Self::default()
+	}
+	/// Cartesian product for VariadicValue conditional indexed parameters. 
+	/// Executed once on struct instance.
+	/// i.e. `[A,[B,C]]` to `[[A,B],[A,C]]`.
+	fn flatten(topic: &Topic) -> Vec<FlatTopic> {
+		fn cartesian(lists: &Vec<Vec<Option<H256>>>) -> Vec<Vec<Option<H256>>> {
+			let mut res = vec![];
+		 
+			let mut list_iter = lists.iter();
+			if let Some(first_list) = list_iter.next() {
+				for &i in first_list {
+					res.push(vec![i]);
+				}
+			}
+			for l in list_iter {
+				let mut tmp = vec![];
+				for r in res {
+					for &el in l {
+						let mut tmp_el = r.clone();
+						tmp_el.push(el);
+						tmp.push(tmp_el);
+					}
+				}
+				res = tmp;
+			}
+			res
+		}
+		let mut out: Vec<FlatTopic> = Vec::new();
+		match topic {
+			VariadicValue::Multiple(multi) => {
+				let mut foo: Vec<Vec<Option<H256>>> = Vec::new();
+				for v in multi {
+					if let Some(v) = v {
+						match v {
+							VariadicValue::Single(s) => {
+								foo.push(vec![s.clone()]);
+							},
+							VariadicValue::Multiple(s) => {
+								foo.push(s.clone());
+							},
+							VariadicValue::Null => {
+								foo.push(vec![None]);
+							},
+						}
+					}
+				}
+				for permut in cartesian(&foo) {
+					out.push(FlatTopic::Multiple(permut));
+				}
+			},
+			VariadicValue::Single(single) => {
+				if let Some(single) = single {
+					out.push(single.clone());
+				}
+			},
+			VariadicValue::Null => {
+				out.push(FlatTopic::Null);
+			},
+		}
+		out
+	}
+
+	/// Replace None values - aka wildcards - for the log input value in that position.
+	pub fn replace(&self, log: &Log, topic: FlatTopic) -> Option<Vec<H256>> {
+		let mut out: Vec<H256> = Vec::new(); 
+		match topic {
+			VariadicValue::Single(value) => {
+				if let Some(value) = value {
+					out.push(value);
+				}
+			},
+			VariadicValue::Multiple(value) => {
+				for (k, v) in value.into_iter().enumerate() {
+					if let Some(v) = v {
+						out.push(v);
+					} else {
+						out.push(log.topics[k].clone());
+					}
+				}
+			},
+			_ => {}
+		};
+		if out.len() == 0 {
+			return None;
+		}
+		Some(out)
+	}
+
+	pub fn filter_block_range(
+		&self,
+		block_number: u64
+	) -> bool {
+		let mut out = true;
+		let filter = self.filter.clone().unwrap();
+		if let Some(from) = filter.from_block {
+			if from.to_min_block_num().unwrap_or(0 as u64) > block_number {
+				out = false;
+			}
+		}
+		if let Some(to) = filter.to_block {
+			if to.to_min_block_num().unwrap_or(0 as u64) < block_number {
+				out = false;
+			}
+		}
+		out
+	}
+
+	pub fn filter_block_hash(
+		&self,
+		block_hash: H256
+	) -> bool {
+		if let Some(h) = self.filter.clone().unwrap().block_hash {
+			if h != block_hash { return false; }
+		}
+		true
+	}
+
+	pub fn filter_address(
+		&self,
+		log: &Log
+	) -> bool {
+		if let Some(input_address) = &self.filter.clone().unwrap().address {
+			match input_address {
+				VariadicValue::Single(x) => {
+					if log.address != *x { return false; }
+				},
+				VariadicValue::Multiple(x) => {
+					if !x.contains(&log.address) { return false; }
+				},
+				_ => { return true; }
+			}
+		}
+		true
+	}
+
+	pub fn filter_topics(
+		&self,
+		log: &Log
+	) -> bool {
+		for topic in self.flat_topics.clone() {
+			match topic {
+				VariadicValue::Single(single) => {
+					if let Some(single) = single {
+						if log.topics.starts_with(&vec![single]) {
+							return true;
+						}
+						
+					}
+				},
+				VariadicValue::Multiple(_) => {
+					let replaced: Option<Vec<H256>> = self.replace(log, topic);
+					if let Some(replaced) = replaced {
+						if log.topics.starts_with(
+							&replaced[..]
+						) {
+							return true;
+						}
+					}
+				},
+				_ => { return true; }
+			}
+		}
+		false
+	}
 }
 
 /// Results of the filter_changes RPC.
